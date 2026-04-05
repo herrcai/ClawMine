@@ -338,6 +338,82 @@ async function doSign(){
 </body>
 </html>`;
 }
+// ─── Chain Submit (local keypair, runs in plugin process) ────────────────────
+async function runChainSubmit(epochs, keypairPath, apiUrl, pluginConfig, logger) {
+    const { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, sendAndConfirmTransaction } = await Promise.resolve().then(() => __importStar(require('@solana/web3.js')));
+    const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, getAccount, TOKEN_PROGRAM_ID } = await Promise.resolve().then(() => __importStar(require('@solana/spl-token')));
+    const crypto = await Promise.resolve().then(() => __importStar(require('crypto')));
+    const solanaRpcUrl = pluginConfig.solanaRpcUrl ?? 'https://api.devnet.solana.com';
+    const rewardProgramId = pluginConfig.rewardProgramId ?? '2sw21aMVVodkuZinMpqk9EZSM5NFTpbtvFqb1K89wPy8';
+    const rewardMint = pluginConfig.rewardMint ?? '4vfddkdq6ZFnFKaKeHTSmja1P34GYoBvipycq5wmhqst';
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    const connection = new Connection(solanaRpcUrl, { commitment: 'confirmed' });
+    const keypairData = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
+    const keypair = Keypair.fromSecretKey(Uint8Array.from(keypairData));
+    function anchorDisc(name) {
+        return crypto.createHash('sha256').update(`global:${name}`).digest().slice(0, 8);
+    }
+    const results = [];
+    for (const epoch of epochs) {
+        try {
+            const pid = new PublicKey(rewardProgramId);
+            const mint = new PublicKey(rewardMint);
+            const epochIdBuf = Buffer.alloc(8);
+            epochIdBuf.writeBigUInt64LE(BigInt(epoch.epoch_id));
+            const [epochConfigPDA] = PublicKey.findProgramAddressSync([Buffer.from('epoch_config'), epochIdBuf], pid);
+            const vault = await getAssociatedTokenAddress(mint, epochConfigPDA, true);
+            // 确保 vault ATA 存在
+            try {
+                await getAccount(connection, vault);
+            }
+            catch {
+                await sendAndConfirmTransaction(connection, new Transaction().add(createAssociatedTokenAccountInstruction(keypair.publicKey, vault, epochConfigPDA, mint)), [keypair], { commitment: 'confirmed' });
+            }
+            // 构造 initialize_epoch 指令
+            const rootHex = epoch.merkle_root.startsWith('0x') ? epoch.merkle_root.slice(2) : epoch.merkle_root;
+            const rootBytes = Buffer.from(rootHex.padStart(64, '0'), 'hex');
+            const now = Math.floor(Date.now() / 1000);
+            const argsBuf = Buffer.alloc(8 + 32 + 8 + 8 + 8);
+            let off = 0;
+            argsBuf.writeBigUInt64LE(BigInt(epoch.epoch_id), off);
+            off += 8;
+            rootBytes.copy(argsBuf, off);
+            off += 32;
+            argsBuf.writeBigUInt64LE(BigInt(epoch.reward_pool), off);
+            off += 8;
+            argsBuf.writeBigInt64LE(BigInt(now), off);
+            off += 8;
+            argsBuf.writeBigInt64LE(BigInt(now + 300), off);
+            const data = Buffer.concat([Buffer.from(anchorDisc('initialize_epoch')), argsBuf]);
+            const sig = await sendAndConfirmTransaction(connection, new Transaction().add(new TransactionInstruction({
+                programId: pid,
+                keys: [
+                    { pubkey: epochConfigPDA, isSigner: false, isWritable: true },
+                    { pubkey: mint, isSigner: false, isWritable: false },
+                    { pubkey: vault, isSigner: false, isWritable: true },
+                    { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
+                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+                ],
+                data,
+            })), [keypair], { commitment: 'confirmed' });
+            await fetch(`${apiUrl}/api/epochs/${epoch.epoch_id}/tx-hash`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tx_hash: sig }),
+            });
+            logger.info(`[ClawMine] Epoch #${epoch.epoch_id} settled: ${sig}`);
+            results.push({ epochId: epoch.epoch_id, sig });
+        }
+        catch (err) {
+            const msg = err.message.slice(0, 120);
+            logger.warn(`[ClawMine] Epoch #${epoch.epoch_id} settle failed: ${msg}`);
+            results.push({ epochId: epoch.epoch_id, error: msg });
+        }
+    }
+    return results;
+}
 function startBindServer(params) {
     return new Promise((resolveStart) => {
         const { userId, apiUrl, walletHint, ttlMs = 5 * 60000 } = params;
@@ -490,6 +566,28 @@ exports.default = definePluginEntry({
                 setInterval(() => {
                     sendHeartbeat(apiUrl, apiKey, userId);
                 }, 5 * 60000);
+                // 自动提交链上：每 5 分钟检查并自动提交 pending epoch
+                const autoSettle = async () => {
+                    try {
+                        const keypairPath = process.env.SOLANA_KEYPAIR_PATH ?? path.join(os.homedir(), '.config', 'solana', 'id.json');
+                        if (!fs.existsSync(keypairPath))
+                            return; // 无私鑰，跳过
+                        const res = await fetch(`${apiUrl}/api/epochs/pending-chain-submit`);
+                        if (!res.ok)
+                            return;
+                        const { epochs } = await res.json();
+                        if (epochs.length === 0)
+                            return;
+                        api.logger.info(`[ClawMine] Auto-settling ${epochs.length} pending epoch(s)...`);
+                        await runChainSubmit(epochs, keypairPath, apiUrl, pluginConfig, api.logger);
+                    }
+                    catch (err) {
+                        api.logger.warn(`[ClawMine] Auto-settle error: ${err.message}`);
+                    }
+                };
+                // 启动时立即运行一次，然后每 5 分钟
+                autoSettle();
+                setInterval(autoSettle, 5 * 60000);
             },
         });
         api.registerCommand({
@@ -561,99 +659,25 @@ exports.default = definePluginEntry({
         });
         api.registerCommand({
             name: "mine-settle",
-            description: "Submit pending epoch Merkle Roots to Solana chain (requires local keypair). Usage: /mine-settle",
+            description: "[Admin] Manually trigger chain settlement. Normally runs automatically.",
             async handler(_ctx) {
                 try {
-                    // 1. 拉取待提交的 epoch（有 merkle_root 但无 solana_tx_hash）
-                    const res = await fetch(`${apiUrl}/api/epochs/pending-chain-submit`, {
-                        headers: { 'x-internal-key': apiKey },
-                    });
+                    const keypairPath = process.env.SOLANA_KEYPAIR_PATH ?? path.join(os.homedir(), '.config', 'solana', 'id.json');
+                    if (!fs.existsSync(keypairPath))
+                        return reply(`❌ Keypair not found at \`${keypairPath}\`.`);
+                    const res = await fetch(`${apiUrl}/api/epochs/pending-chain-submit`);
                     if (!res.ok)
                         return reply(`❌ Failed to fetch pending epochs: ${res.status}`);
                     const { epochs } = await res.json();
                     if (epochs.length === 0)
-                        return reply(`✅ **All epochs settled.** No pending chain submissions.`);
-                    // 2. 加载本地私鑰
-                    const keypairPath = process.env.SOLANA_KEYPAIR_PATH ?? path.join(os.homedir(), '.config', 'solana', 'id.json');
-                    let keypairData;
-                    try {
-                        keypairData = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
-                    }
-                    catch {
-                        return reply(`❌ Keypair not found at \`${keypairPath}\`.\n\nRun \`solana-keygen new\` or set \`SOLANA_KEYPAIR_PATH\`.`);
-                    }
-                    const lines = [`⛓️ **Chain Submit** \u2014 ${epochs.length} epoch(s) pending`, ``];
-                    // 3. 动态 import chain-submit 逻辑（直接调用现有的 submitEpochToChain）
-                    const { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, sendAndConfirmTransaction } = await Promise.resolve().then(() => __importStar(require('@solana/web3.js')));
-                    const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, getAccount, TOKEN_PROGRAM_ID } = await Promise.resolve().then(() => __importStar(require('@solana/spl-token')));
-                    const crypto = await Promise.resolve().then(() => __importStar(require('crypto')));
-                    const solanaRpcUrl = pluginConfig.solanaRpcUrl ?? 'https://api.devnet.solana.com';
-                    const rewardProgramId = pluginConfig.rewardProgramId ?? '2sw21aMVVodkuZinMpqk9EZSM5NFTpbtvFqb1K89wPy8';
-                    const rewardMint = pluginConfig.rewardMint ?? '4vfddkdq6ZFnFKaKeHTSmja1P34GYoBvipycq5wmhqst';
-                    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-                    const connection = new Connection(solanaRpcUrl, { commitment: 'confirmed' });
-                    const keypair = Keypair.fromSecretKey(Uint8Array.from(keypairData));
-                    function anchorDisc(name) {
-                        return crypto.createHash('sha256').update(`global:${name}`).digest().slice(0, 8);
-                    }
-                    for (const epoch of epochs) {
-                        try {
-                            const pid = new PublicKey(rewardProgramId);
-                            const mint = new PublicKey(rewardMint);
-                            const epochIdBuf = Buffer.alloc(8);
-                            epochIdBuf.writeBigUInt64LE(BigInt(epoch.epoch_id));
-                            const [epochConfigPDA] = PublicKey.findProgramAddressSync([Buffer.from('epoch_config'), epochIdBuf], pid);
-                            const vault = await getAssociatedTokenAddress(mint, epochConfigPDA, true);
-                            // 确保 vault ATA 存在
-                            try {
-                                await getAccount(connection, vault);
-                            }
-                            catch {
-                                const createVaultTx = new Transaction().add(createAssociatedTokenAccountInstruction(keypair.publicKey, vault, epochConfigPDA, mint));
-                                await sendAndConfirmTransaction(connection, createVaultTx, [keypair], { commitment: 'confirmed' });
-                            }
-                            // 构造 initialize_epoch 指令
-                            const disc = anchorDisc('initialize_epoch');
-                            const rootHex = epoch.merkle_root.startsWith('0x') ? epoch.merkle_root.slice(2) : epoch.merkle_root;
-                            const rootBytes = Buffer.from(rootHex.padStart(64, '0'), 'hex');
-                            const now = Math.floor(Date.now() / 1000);
-                            const argsBuf = Buffer.alloc(8 + 32 + 8 + 8 + 8);
-                            let off = 0;
-                            argsBuf.writeBigUInt64LE(BigInt(epoch.epoch_id), off);
-                            off += 8;
-                            rootBytes.copy(argsBuf, off);
-                            off += 32;
-                            argsBuf.writeBigUInt64LE(BigInt(epoch.reward_pool), off);
-                            off += 8;
-                            argsBuf.writeBigInt64LE(BigInt(now), off);
-                            off += 8;
-                            argsBuf.writeBigInt64LE(BigInt(now + 300), off);
-                            const data = Buffer.concat([Buffer.from(disc), argsBuf]);
-                            const ix = new TransactionInstruction({
-                                programId: pid,
-                                keys: [
-                                    { pubkey: epochConfigPDA, isSigner: false, isWritable: true },
-                                    { pubkey: mint, isSigner: false, isWritable: false },
-                                    { pubkey: vault, isSigner: false, isWritable: true },
-                                    { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
-                                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                                    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
-                                ],
-                                data,
-                            });
-                            const sig = await sendAndConfirmTransaction(connection, new Transaction().add(ix), [keypair], { commitment: 'confirmed' });
-                            // 回调服务器更新 tx hash
-                            await fetch(`${apiUrl}/api/epochs/${epoch.epoch_id}/tx-hash`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'x-internal-key': apiKey },
-                                body: JSON.stringify({ tx_hash: sig }),
-                            });
-                            lines.push(`✅ Epoch #${epoch.epoch_id} → [${sig.slice(0, 12)}…](https://solscan.io/tx/${sig}?cluster=devnet)`);
-                        }
-                        catch (epochErr) {
-                            lines.push(`❌ Epoch #${epoch.epoch_id} failed: ${epochErr.message.slice(0, 80)}`);
-                        }
+                        return reply(`✅ All epochs settled. Nothing to submit.`);
+                    const results = await runChainSubmit(epochs, keypairPath, apiUrl, pluginConfig, api.logger);
+                    const lines = [`⛓️ **Chain Submit** — ${epochs.length} epoch(s)`, ``];
+                    for (const r of results) {
+                        if (r.sig)
+                            lines.push(`✅ Epoch #${r.epochId} → ${r.sig.slice(0, 12)}…`);
+                        else
+                            lines.push(`❌ Epoch #${r.epochId}: ${r.error}`);
                     }
                     return reply(lines.join('\n'));
                 }
