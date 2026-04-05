@@ -258,10 +258,11 @@ h1{font-size:22px;font-weight:700;margin-bottom:8px}
          border-radius:50%;animation:spin .7s linear infinite;
          margin-right:10px;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
-.retry{margin-top:20px;height:42px;padding:0 24px;border-radius:8px;
-       font-size:14px;font-weight:600;cursor:pointer;
-       border:1px solid #2a2a2a;background:#161616;color:#e5e5e5;display:none}
-.retry:hover{background:#1e1e1e}
+.sign-btn{width:100%;height:52px;border-radius:10px;font-size:15px;font-weight:700;
+           cursor:pointer;border:none;background:#fff;color:#000;
+           margin-bottom:20px;transition:all .15s;letter-spacing:.01em}
+.sign-btn:hover{background:#f0f0f0}
+.sign-btn:disabled{background:#222;color:#555;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -270,8 +271,10 @@ h1{font-size:22px;font-weight:700;margin-bottom:8px}
     <h1>Binding to ClawMine</h1>
     <p class="sub">Phantom will pop up automatically.<br/>Click <strong>Sign</strong> to link your wallet to this node.</p>
     <div class="node">Node · ${userId.slice(0, 8)}&hellip;</div>
+    <button class="sign-btn" id="signBtn" onclick="doSign()">
+      <span id="btnIcon">👻</span> Connect & Sign with Phantom
+    </button>
     <div class="status" id="st"></div>
-    <button class="retry" id="retry" onclick="doSign()">Try Again</button>
   </div>
 <script>
 const NONCE=${JSON.stringify(nonce)};
@@ -281,9 +284,6 @@ const CB='http://127.0.0.1:${callbackPort}/callback';
 function st(msg,cls){
   document.getElementById('st').innerHTML=msg;
   document.getElementById('st').className='status '+(cls||'');
-}
-function showRetry(show){
-  document.getElementById('retry').style.display=show?'inline-block':'none';
 }
 function b58(bytes){
   const A='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -295,26 +295,28 @@ function b58(bytes){
   while(d.length>0)s+=A[d.pop()];return s;
 }
 async function doSign(){
-  showRetry(false);
+  const btn=document.getElementById('signBtn');
+  btn.disabled=true;
   st('<span class="spinner"></span>Waiting for Phantom…','info');
   try{
     const p=window.phantom?.solana;
-    if(!p) throw new Error('Phantom extension not found. Please install Phantom and refresh.');
+    if(!p) throw new Error('Phantom extension not found. Please install Phantom and refresh this page.');
     const r=await p.connect();
     const pub=r.publicKey.toString();
-    st('<span class="spinner"></span>Approve the message in Phantom…','info');
+    st('<span class="spinner"></span>Sign the message in the Phantom popup…','info');
     const sig=b58((await p.signMessage(new TextEncoder().encode(CHALLENGE),'utf8')).signature);
     st('<span class="spinner"></span>Verifying…','info');
     const res=await fetch(CB,{method:'POST',headers:{'Content-Type':'text/plain'},body:NONCE+'|'+pub+'|'+sig});
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Verification failed');
-    st('✅ <strong style="color:#4ade80">'+pub.slice(0,6)+'…'+pub.slice(-4)+'</strong> linked!<br/><span style="font-size:12px;color:#555">You can close this tab.</span>','ok');
+    btn.style.background='#0f2a0f';btn.style.color='#4ade80';btn.style.border='1px solid #1a4a1a';
+    btn.innerHTML='✅ Wallet Bound';
+    st('<strong style="color:#4ade80">'+pub.slice(0,6)+'…'+pub.slice(-4)+'</strong> linked to your node.<br/><span style="font-size:12px;color:#555">You can close this tab and return to OpenClaw.</span>','ok');
   }catch(e){
-    st('❌ '+(e.message||String(e)),'err');
-    showRetry(true);
+    btn.disabled=false;
+    st('❌ '+(e.message||String(e))+'<br/><span style="font-size:12px;color:#555">Click the button above to try again.</span>','err');
   }
 }
-setTimeout(doSign,300);
 <\/script>
 </body>
 </html>`;
