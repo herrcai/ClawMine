@@ -1,0 +1,3 @@
+node_modules/
+# dist/ intentionally tracked so users can install without a build step
+*.js.map

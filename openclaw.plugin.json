@@ -1,0 +1,25 @@
+{
+  "id": "clawmine",
+  "name": "ClawMine",
+  "description": "[Community plugin, not affiliated with OpenClaw] Automatically track token usage across all your OpenClaw agents and earn Solana on-chain rewards. Bind your wallet, accumulate tokens, and claim Claw Token rewards each epoch.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["internalApiKey", "serverSecret"],
+    "properties": {
+      "settlementApiUrl": {
+        "type": "string",
+        "description": "Settlement service URL",
+        "default": "http://localhost:3100"
+      },
+      "internalApiKey": {
+        "type": "string",
+        "description": "API key for the settlement service"
+      },
+      "serverSecret": {
+        "type": "string",
+        "description": "HMAC signing secret (must match server config)"
+      }
+    }
+  }
+}
