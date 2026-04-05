@@ -339,80 +339,36 @@ async function doSign(){
 </html>`;
 }
 // ─── Chain Submit (local keypair, runs in plugin process) ────────────────────
-async function runChainSubmit(epochs, keypairPath, apiUrl, pluginConfig, logger) {
-    const { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, sendAndConfirmTransaction } = await Promise.resolve().then(() => __importStar(require('@solana/web3.js')));
-    const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, getAccount, TOKEN_PROGRAM_ID } = await Promise.resolve().then(() => __importStar(require('@solana/spl-token')));
-    const crypto = await Promise.resolve().then(() => __importStar(require('crypto')));
-    const solanaRpcUrl = pluginConfig.solanaRpcUrl ?? 'https://api.devnet.solana.com';
-    const rewardProgramId = pluginConfig.rewardProgramId ?? '2sw21aMVVodkuZinMpqk9EZSM5NFTpbtvFqb1K89wPy8';
-    const rewardMint = pluginConfig.rewardMint ?? '4vfddkdq6ZFnFKaKeHTSmja1P34GYoBvipycq5wmhqst';
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-    const connection = new Connection(solanaRpcUrl, { commitment: 'confirmed' });
-    const keypairData = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
-    const keypair = Keypair.fromSecretKey(Uint8Array.from(keypairData));
-    function anchorDisc(name) {
-        return crypto.createHash('sha256').update(`global:${name}`).digest().slice(0, 8);
-    }
-    const results = [];
-    for (const epoch of epochs) {
-        try {
-            const pid = new PublicKey(rewardProgramId);
-            const mint = new PublicKey(rewardMint);
-            const epochIdBuf = Buffer.alloc(8);
-            epochIdBuf.writeBigUInt64LE(BigInt(epoch.epoch_id));
-            const [epochConfigPDA] = PublicKey.findProgramAddressSync([Buffer.from('epoch_config'), epochIdBuf], pid);
-            const vault = await getAssociatedTokenAddress(mint, epochConfigPDA, true);
-            // 确保 vault ATA 存在
+// 通过独立 CLI 脚本提交链上（CLI 脚本有完整依赖，私鑰不离开本地）
+async function runChainSubmit(_epochs, keypairPath, apiUrl, _pluginConfig, logger) {
+    return new Promise((resolve) => {
+        // CLI 脚本路径： settlement-service/scripts/chain-submit-cli.js
+        const scriptPath = path.join(os.homedir(), '.openclaw', 'workspace', 'claw-settle', 'settlement-service', 'scripts', 'chain-submit-cli.js');
+        if (!fs.existsSync(scriptPath)) {
+            logger.warn(`[ClawMine] chain-submit-cli.js not found at ${scriptPath}`);
+            resolve([{ epochId: 0, error: 'chain-submit-cli.js not found' }]);
+            return;
+        }
+        const { execFile } = require('child_process');
+        let stdout = '';
+        const child = execFile(process.execPath, // node 可执行文件
+        [scriptPath, apiUrl, keypairPath], { timeout: 5 * 60 * 1000, maxBuffer: 1024 * 1024 }, (err, out) => {
+            stdout = out || '';
             try {
-                await getAccount(connection, vault);
+                const result = JSON.parse(stdout);
+                if (result.error) {
+                    resolve([{ epochId: 0, error: result.error }]);
+                }
+                else {
+                    resolve(result.results ?? []);
+                }
             }
             catch {
-                await sendAndConfirmTransaction(connection, new Transaction().add(createAssociatedTokenAccountInstruction(keypair.publicKey, vault, epochConfigPDA, mint)), [keypair], { commitment: 'confirmed' });
+                resolve([{ epochId: 0, error: `parse error: ${stdout.slice(0, 200)}` }]);
             }
-            // 构造 initialize_epoch 指令
-            const rootHex = epoch.merkle_root.startsWith('0x') ? epoch.merkle_root.slice(2) : epoch.merkle_root;
-            const rootBytes = Buffer.from(rootHex.padStart(64, '0'), 'hex');
-            const now = Math.floor(Date.now() / 1000);
-            const argsBuf = Buffer.alloc(8 + 32 + 8 + 8 + 8);
-            let off = 0;
-            argsBuf.writeBigUInt64LE(BigInt(epoch.epoch_id), off);
-            off += 8;
-            rootBytes.copy(argsBuf, off);
-            off += 32;
-            argsBuf.writeBigUInt64LE(BigInt(epoch.reward_pool), off);
-            off += 8;
-            argsBuf.writeBigInt64LE(BigInt(now), off);
-            off += 8;
-            argsBuf.writeBigInt64LE(BigInt(now + 300), off);
-            const data = Buffer.concat([Buffer.from(anchorDisc('initialize_epoch')), argsBuf]);
-            const sig = await sendAndConfirmTransaction(connection, new Transaction().add(new TransactionInstruction({
-                programId: pid,
-                keys: [
-                    { pubkey: epochConfigPDA, isSigner: false, isWritable: true },
-                    { pubkey: mint, isSigner: false, isWritable: false },
-                    { pubkey: vault, isSigner: false, isWritable: true },
-                    { pubkey: keypair.publicKey, isSigner: true, isWritable: true },
-                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
-                ],
-                data,
-            })), [keypair], { commitment: 'confirmed' });
-            await fetch(`${apiUrl}/api/epochs/${epoch.epoch_id}/tx-hash`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tx_hash: sig }),
-            });
-            logger.info(`[ClawMine] Epoch #${epoch.epoch_id} settled: ${sig}`);
-            results.push({ epochId: epoch.epoch_id, sig });
-        }
-        catch (err) {
-            const msg = err.message.slice(0, 120);
-            logger.warn(`[ClawMine] Epoch #${epoch.epoch_id} settle failed: ${msg}`);
-            results.push({ epochId: epoch.epoch_id, error: msg });
-        }
-    }
-    return results;
+        });
+        child.stdout?.on('data', (d) => { stdout += d.toString(); });
+    });
 }
 function startBindServer(params) {
     return new Promise((resolveStart) => {
