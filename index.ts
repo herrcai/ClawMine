@@ -318,9 +318,8 @@ async function doSign(){
 
     btn.style.cssText='background:#0f2a0f;color:#4ade80;border:1px solid #1a4a1a;cursor:default';
     btn.innerHTML='✅ Wallet Bound';
-    st('<strong style="color:#4ade80">'+pub.slice(0,6)+'…'+pub.slice(-4)+'</strong> linked to your node.<br/><small style="color:#555">Closing in 2 seconds…</small>','ok');
-    // 自动关闭页面
-    setTimeout(()=>{ try{window.close();}catch(e){} }, 2000);
+    // 成功后跳转到关闭页
+    window.location.href = LOCAL + '/done?wallet=' + encodeURIComponent(pub);
   }catch(e){
     btn.disabled=false;
     const msg=e.message||String(e);
@@ -363,6 +362,37 @@ function startBindServer(params: {
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+      // /done — 绑定成功后跳转到此页，提示用户关闭页面
+      if (req.method === 'GET' && url.pathname === '/done') {
+        const wallet = url.searchParams.get('wallet') ?? '';
+        const short = wallet ? wallet.slice(0,6)+'…'+wallet.slice(-4) : '';
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Wallet Bound</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0a0a;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{text-align:center;padding:48px 40px;max-width:400px}
+.check{font-size:64px;margin-bottom:24px}
+h1{font-size:22px;font-weight:700;color:#4ade80;margin-bottom:12px}
+p{font-size:14px;color:#555;line-height:1.7}
+.addr{font-family:monospace;color:#38bdf8;font-size:13px;
+      background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);
+      border-radius:6px;padding:4px 10px;display:inline-block;margin:6px 0}
+.hint{margin-top:20px;font-size:13px;color:#333}
+</style></head><body>
+<div class="card">
+  <div class="check">✅</div>
+  <h1>Wallet Bound!</h1>
+  <p><span class="addr">${short}</span><br/>is now linked to your ClawMine node.</p>
+  <p class="hint">You can close this tab.</p>
+</div>
+</body></html>`;
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(html);
+        return;
+      }
 
       // /challenge — 浏览器连上钱包后，用真实地址向 service 申请 challenge
       if (req.method === 'POST' && url.pathname === '/challenge') {
