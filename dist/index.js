@@ -322,10 +322,17 @@ async function doSign(){
 
     btn.style.cssText='background:#0f2a0f;color:#4ade80;border:1px solid #1a4a1a;cursor:default';
     btn.innerHTML='✅ Wallet Bound';
-    st('<strong style="color:#4ade80">'+pub.slice(0,6)+'…'+pub.slice(-4)+'</strong> linked to your node.<br/><small style="color:#555">You can close this tab and return to OpenClaw.</small>','ok');
+    st('<strong style="color:#4ade80">'+pub.slice(0,6)+'…'+pub.slice(-4)+'</strong> linked to your node.<br/><small style="color:#555">Closing in 2 seconds…</small>','ok');
+    // 自动关闭页面
+    setTimeout(()=>{ try{window.close();}catch(e){} }, 2000);
   }catch(e){
     btn.disabled=false;
-    st('❌ '+(e.message||String(e))+'<br/><small style="color:#555">Click the button above to try again.</small>','err');
+    const msg=e.message||String(e);
+    const isDuplicate=msg.toLowerCase().includes('already bound');
+    st('❌ '+msg+(isDuplicate
+      ?'<br/><small style="color:#555">This wallet is already linked to a node.</small>'
+      :'<br/><small style="color:#555">Click the button above to try again.</small>'
+    ),'err');
   }
 }
 <\/script>
@@ -462,21 +469,39 @@ exports.default = definePluginEntry({
             acceptsArgs: false,
             async handler(_ctx) {
                 try {
-                    const { url } = await startBindServer({ userId, apiUrl, walletHint: 'phantom' });
-                    // 自动打开浏览器，页面自动触发 Phantom 签名
+                    // 检查是否已绑定
+                    const existing = await fetch(`${apiUrl}/api/wallet/${userId}`);
+                    if (existing.ok) {
+                        const w = await existing.json();
+                        const addr = w.wallet_address;
+                        return reply(`✅ **Already bound**\n\nThis node is already linked to wallet \`${addr.slice(0, 6)}...${addr.slice(-4)}\`.\n\nRun \`/mine-status\` to see your rewards.`);
+                    }
+                    const { url, result } = await startBindServer({ userId, apiUrl, walletHint: 'phantom' });
                     openBrowser(url);
-                    return reply([
-                        `🔐 **Wallet binding started**`,
-                        ``,
-                        `A signing page has been opened in your browser.`,
-                        `Phantom will pop up automatically — just click **Confirm** to complete.`,
-                        ``,
-                        `After success, run \`/mine-status\` to verify.`,
-                        `⏰ Expires in 5 minutes.`,
-                    ].join('\n'));
+                    // 先告知用户浏览器已打开，同时等待绑定结果（最多 5 分钟）
+                    // Note: OpenClaw plugin-sdk 不支持异步推送，所以这里同步等待完成再返回
+                    const bindResult = await Promise.race([
+                        result,
+                        new Promise(r => setTimeout(() => r({ success: false, error: 'timeout' }), 5 * 60000)),
+                    ]);
+                    if (bindResult.success) {
+                        const addr = bindResult.wallet ?? '';
+                        return reply([
+                            `✅ **Wallet bound successfully!**`,
+                            ``,
+                            `\`${addr.slice(0, 6)}...${addr.slice(-4)}\` is now linked to this node.`,
+                            `Rewards will accumulate from the next epoch.`,
+                        ].join('\n'));
+                    }
+                    else if (bindResult.error === 'timeout') {
+                        return reply(`⏰ **Binding timed out.** Run \`/mine-bind\` again to retry.`);
+                    }
+                    else {
+                        return reply(`❌ **Binding failed:** ${bindResult.error}\n\nRun \`/mine-bind\` to retry.`);
+                    }
                 }
                 catch (err) {
-                    return reply(`❌ Failed to start bind flow: ${err.message}`);
+                    return reply(`❌ Failed: ${err.message}`);
                 }
             },
         });
