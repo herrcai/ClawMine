@@ -225,12 +225,10 @@ function openBrowser(url: string): void {
 
 function buildBindPage(params: {
   userId: string;
-  challenge: string;
-  nonce: string;
   callbackPort: number;
   walletHint: 'phantom' | 'solflare' | 'auto';
 }): string {
-  const { userId, challenge, nonce, callbackPort, walletHint } = params;
+  const { userId, callbackPort, walletHint } = params;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -270,49 +268,60 @@ h1{font-size:22px;font-weight:700;margin-bottom:8px}
     <p class="sub">Phantom will pop up automatically.<br/>Click <strong>Sign</strong> to link your wallet to this node.</p>
     <div class="node">Node · ${userId.slice(0, 8)}&hellip;</div>
     <button class="sign-btn" id="signBtn" onclick="doSign()">
-      <span id="btnIcon">👻</span> Connect & Sign with Phantom
+      <span>👻</span> Connect & Sign with Phantom
     </button>
     <div class="status" id="st"></div>
   </div>
 <script>
-const NONCE=${JSON.stringify(nonce)};
-const CHALLENGE=${JSON.stringify(challenge)};
-const CB='http://127.0.0.1:${callbackPort}/callback';
+// Challenge is fetched AFTER wallet connects (so real wallet address is embedded)
+const USER_ID=${JSON.stringify(userId)};
+const LOCAL='http://127.0.0.1:${callbackPort}';
 
-function st(msg,cls){
-  document.getElementById('st').innerHTML=msg;
-  document.getElementById('st').className='status '+(cls||'');
-}
+function st(msg,cls){const e=document.getElementById('st');e.innerHTML=msg;e.className='status '+(cls||'');}
 function b58(bytes){
   const A='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
   let d=[],s='',j,c,n;
-  for(let i=0;i<bytes.length;i++){
-    j=0;c=bytes[i];s+=c===0&&s.length===0?'1':'';
-    while(j<d.length||(c>0)){n=(d[j]||0)*256+c;d[j]=n%58;c=n/58|0;j++;}
-  }
+  for(let i=0;i<bytes.length;i++){j=0;c=bytes[i];s+=c===0&&s.length===0?'1':'';while(j<d.length||(c>0)){n=(d[j]||0)*256+c;d[j]=n%58;c=n/58|0;j++;}}
   while(d.length>0)s+=A[d.pop()];return s;
 }
 async function doSign(){
   const btn=document.getElementById('signBtn');
   btn.disabled=true;
-  st('<span class="spinner"></span>Waiting for Phantom…','info');
   try{
+    // Step 1: connect wallet
+    st('<span class="spinner"></span>Connecting to Phantom…','info');
     const p=window.phantom?.solana;
-    if(!p) throw new Error('Phantom extension not found. Please install Phantom and refresh this page.');
+    if(!p) throw new Error('Phantom not found. Install the Phantom extension and refresh.');
     const r=await p.connect();
     const pub=r.publicKey.toString();
+
+    // Step 2: get challenge from local plugin server (plugin forwards to service)
+    st('<span class="spinner"></span>Preparing signature request…','info');
+    const cr=await fetch(LOCAL+'/challenge',{
+      method:'POST',headers:{'Content-Type':'text/plain'},body:USER_ID+'|'+pub
+    });
+    const cd=await cr.json();
+    if(!cd.nonce) throw new Error('Failed to get challenge: '+(cd.error||cr.status));
+
+    // Step 3: sign with Phantom
     st('<span class="spinner"></span>Sign the message in the Phantom popup…','info');
-    const sig=b58((await p.signMessage(new TextEncoder().encode(CHALLENGE),'utf8')).signature);
+    const sig=b58((await p.signMessage(new TextEncoder().encode(cd.challenge),'utf8')).signature);
+
+    // Step 4: verify via local plugin
     st('<span class="spinner"></span>Verifying…','info');
-    const res=await fetch(CB,{method:'POST',headers:{'Content-Type':'text/plain'},body:NONCE+'|'+pub+'|'+sig});
-    const d=await res.json();
-    if(!d.success) throw new Error(d.error||'Verification failed');
-    btn.style.background='#0f2a0f';btn.style.color='#4ade80';btn.style.border='1px solid #1a4a1a';
+    const vr=await fetch(LOCAL+'/callback',{
+      method:'POST',headers:{'Content-Type':'text/plain'},
+      body:cd.nonce+'|'+pub+'|'+sig
+    });
+    const vd=await vr.json();
+    if(!vd.success) throw new Error(vd.error||'Verification failed');
+
+    btn.style.cssText='background:#0f2a0f;color:#4ade80;border:1px solid #1a4a1a;cursor:default';
     btn.innerHTML='✅ Wallet Bound';
-    st('<strong style="color:#4ade80">'+pub.slice(0,6)+'…'+pub.slice(-4)+'</strong> linked to your node.<br/><span style="font-size:12px;color:#555">You can close this tab and return to OpenClaw.</span>','ok');
+    st('<strong style="color:#4ade80">'+pub.slice(0,6)+'…'+pub.slice(-4)+'</strong> linked to your node.<br/><small style="color:#555">You can close this tab and return to OpenClaw.</small>','ok');
   }catch(e){
     btn.disabled=false;
-    st('❌ '+(e.message||String(e))+'<br/><span style="font-size:12px;color:#555">Click the button above to try again.</span>','err');
+    st('❌ '+(e.message||String(e))+'<br/><small style="color:#555">Click the button above to try again.</small>','err');
   }
 }
 <\/script>
@@ -326,29 +335,9 @@ function startBindServer(params: {
   walletHint: 'phantom' | 'solflare' | 'auto';
   ttlMs?: number;
 }): Promise<{ url: string; result: Promise<{ success: boolean; wallet?: string; error?: string }> }> {
-  return new Promise(async (resolveStart) => {
+  return new Promise((resolveStart) => {
     const { userId, apiUrl, walletHint, ttlMs = 5 * 60_000 } = params;
-
-    // Use placeholder address to ask service for challenge; wallet address itself will be checked at verify time.
-    // Better approach: challenge independent of wallet, but current service requires wallet_address. Use a temporary marker.
-    const walletPlaceholder = walletHint === 'solflare' ? 'solflare-pending' : 'phantom-pending';
-    let nonce = '';
-    let challenge = '';
-    try {
-      const res = await fetch(`${apiUrl}/api/wallet/challenge`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, wallet_address: walletPlaceholder }),
-      });
-      const data = await res.json() as { nonce: string; challenge: string };
-      nonce = data.nonce; challenge = data.challenge;
-    } catch (err) {
-      resolveStart({
-        url: 'about:blank',
-        result: Promise.resolve({ success: false, error: `failed_to_prepare_challenge: ${(err as Error).message}` }),
-      });
-      return;
-    }
+    // challenge is now fetched dynamically via /challenge endpoint after wallet connects
 
     let port = 0;
     let resolved = false;
@@ -368,8 +357,31 @@ function startBindServer(params: {
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+      // /challenge — 浏览器连上钱包后，用真实地址向 service 申请 challenge
+      if (req.method === 'POST' && url.pathname === '/challenge') {
+        let body = '';
+        req.on('data', d => body += d);
+        req.on('end', async () => {
+          try {
+            const [uid, walletAddress] = body.split('|');
+            const cr = await fetch(`${apiUrl}/api/wallet/challenge`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user_id: uid, wallet_address: walletAddress }),
+            });
+            const cData = await cr.json() as { nonce?: string; challenge?: string; error?: string };
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(cData));
+          } catch (err) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: String(err) }));
+          }
+        });
+        return;
+      }
+
       if (req.method === 'GET' && url.pathname === '/') {
-        const html = buildBindPage({ userId, challenge, nonce, callbackPort: port, walletHint });
+        const html = buildBindPage({ userId, callbackPort: port, walletHint });
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(html);
         return;
