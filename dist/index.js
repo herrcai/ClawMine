@@ -43,7 +43,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
  *   4. /mine-status     — 查看当前 epoch 状态
  *   5. /mine-rewards    — 查看历史奖励
  */
-const plugin_sdk_1 = require("openclaw/plugin-sdk");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { definePluginEntry } = require("./node_modules/openclaw/dist/plugin-sdk/plugin-entry.js");
 const crypto_1 = require("crypto");
 const fs = __importStar(require("fs"));
 const os = __importStar(require("os"));
@@ -255,8 +256,215 @@ async function sendHeartbeat(apiUrl, apiKey, userId, logger) {
         // 心跳失败静默处理，不打 log（避免日志噪音）
     }
 }
+// ─── 本地临时 HTTP 绑定服务 ──────────────────────────────────────────────────────
+const http = __importStar(require("http"));
+const child_process_1 = require("child_process");
+/** 生成绑定页面 HTML。页面自身连接钒包后，先向 service 动态申请 challenge，再签名。 */
+function buildBindPage(params) {
+    const { userId, callbackPort, apiUrl } = params;
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClawMine — Bind Wallet</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0a0a0a;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+    .card{background:#111;border:1px solid #222;border-radius:16px;padding:40px;max-width:480px;width:100%;text-align:center}
+    .logo{font-size:32px;margin-bottom:16px}
+    h1{font-size:22px;font-weight:700;margin-bottom:8px}
+    .sub{font-size:14px;color:#666;margin-bottom:24px;line-height:1.6}
+    .node-id{font-size:11px;color:#444;margin-bottom:24px;font-family:ui-monospace,monospace;padding:8px 12px;background:#0f1117;border-radius:6px;display:inline-block}
+    .challenge-box{background:#0f1117;border:1px solid #1a1a1a;border-radius:8px;
+      padding:12px 14px;font-family:ui-monospace,monospace;font-size:11px;
+      color:#38bdf8;text-align:left;word-break:break-all;margin-bottom:24px;line-height:1.6;display:none}
+    .btn{width:100%;height:48px;border-radius:10px;font-size:15px;font-weight:600;
+         cursor:pointer;transition:all .15s;border:none}
+    .btn-primary{background:#fff;color:#000}
+    .btn-primary:hover{background:#f0f0f0}
+    .btn-primary:disabled{background:#333;color:#666;cursor:not-allowed}
+    .status{margin-top:20px;font-size:14px;color:#666;min-height:20px;line-height:1.6}
+    .status.ok{color:#4ade80}
+    .status.err{color:#f87171}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">⚡</div>
+    <h1>Bind Your Wallet</h1>
+    <p class="sub">Connect your Solana wallet to link it<br/>to your OpenClaw node and start earning CLAW.</p>
+    <div class="node-id">Node: ${userId.slice(0, 8)}&hellip;</div>
+    <div class="challenge-box" id="chal"></div>
+    <button class="btn btn-primary" id="btn" onclick="doSign()">Connect & Sign with Phantom</button>
+    <div class="status" id="status"></div>
+  </div>
+  <script>
+    const USER_ID   = ${JSON.stringify(userId)};
+    const CALLBACK  = 'http://127.0.0.1:${callbackPort}/callback';
+    const API_URL   = ${JSON.stringify(apiUrl)};
+
+    async function doSign() {
+      const btn    = document.getElementById('btn');
+      const status = document.getElementById('status');
+      const chal   = document.getElementById('chal');
+      btn.disabled = true;
+      btn.textContent = 'Connecting\u2026';
+      status.textContent = '';
+      status.className = 'status';
+
+      try {
+        // 1. 查找 Phantom
+        const provider = window.phantom?.solana ?? window.solana;
+        if (!provider?.isPhantom) {
+          throw new Error('Phantom not found. Install the Phantom browser extension and reload.');
+        }
+
+        // 2. 连接钒包
+        const resp   = await provider.connect();
+        const pubkey = resp.publicKey.toString();
+        status.textContent = 'Connected: ' + pubkey.slice(0,6) + '\u2026' + pubkey.slice(-4);
+        btn.textContent = 'Requesting challenge\u2026';
+
+        // 3. 向 service 申请 challenge
+        const cr = await fetch(API_URL + '/api/wallet/challenge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: USER_ID, wallet_address: pubkey }),
+        });
+        if (!cr.ok) throw new Error('Failed to get challenge: ' + await cr.text());
+        const { nonce, challenge } = await cr.json();
+
+        chal.textContent = challenge;
+        chal.style.display = 'block';
+        btn.textContent = 'Signing\u2026';
+
+        // 4. Phantom 签名
+        const encoded = new TextEncoder().encode(challenge);
+        const { signature } = await provider.signMessage(encoded, 'utf8');
+        const b58 = toBase58(signature);
+
+        // 5. 回调插件验证
+        btn.textContent = 'Verifying\u2026';
+        const r = await fetch(CALLBACK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nonce, wallet_address: pubkey, signature: b58 }),
+        });
+        const result = await r.json();
+
+        if (result.success) {
+          btn.textContent = '\u2705 Wallet Bound!';
+          btn.style.background = '#0f2a0f';
+          btn.style.color = '#4ade80';
+          status.innerHTML = '<strong style="color:#4ade80">' + pubkey.slice(0,6) + '\u2026' + pubkey.slice(-4) + '</strong><br/>Binding complete. Return to OpenClaw.';
+          status.className = 'status ok';
+          chal.style.display = 'none';
+        } else {
+          throw new Error(result.error ?? 'Binding failed');
+        }
+      } catch(e) {
+        btn.disabled = false;
+        btn.textContent = 'Connect & Sign with Phantom';
+        status.textContent = '\u274c ' + (e.message ?? String(e));
+        status.className = 'status err';
+      }
+    }
+
+    function toBase58(bytes) {
+      const A = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+      let d=[],s='',j,c,n;
+      for(let i=0;i<bytes.length;i++){
+        j=0;c=bytes[i];
+        s+=c===0&&s.length===0?'1':'';
+        while(j<d.length||(c>0)){n=(d[j]||0)*256+c;d[j]=n%58;c=n/58|0;j++;}
+      }
+      while(d.length>0)s+=A[d.pop()];
+      return s;
+    }
+  <\/script>
+</body>
+</html>`;
+}
+/** 打开浏览器 */
+function openBrowser(url) {
+    const platform = process.platform;
+    const cmd = platform === 'darwin' ? `open "${url}"`
+        : platform === 'win32' ? `start "" "${url}"`
+            : `xdg-open "${url}"`;
+    (0, child_process_1.exec)(cmd);
+}
+/** 启动一次性本地绑定服务，返回 URL，等待绑定完成 */
+function startBindServer(params) {
+    return new Promise((resolveStart) => {
+        const { userId, apiUrl, ttlMs = 5 * 60000 } = params;
+        // challenge 和 nonce 由页面内自动申请（需要馒包地址）
+        let port = 0;
+        let resolveResult;
+        const resultPromise = new Promise(r => { resolveResult = r; });
+        const server = http.createServer((req, res) => {
+            const url = new URL(req.url, `http://127.0.0.1:${port}`);
+            // CORS headers for browser
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+            if (req.method === 'OPTIONS') {
+                res.writeHead(204);
+                res.end();
+                return;
+            }
+            if (req.method === 'GET' && url.pathname === '/') {
+                const html = buildBindPage({ userId, callbackPort: port, apiUrl });
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(html);
+                return;
+            }
+            if (req.method === 'POST' && url.pathname === '/callback') {
+                // 收到签名回调
+                let body = '';
+                req.on('data', d => body += d);
+                req.on('end', async () => {
+                    try {
+                        const { nonce: n, wallet_address, signature } = JSON.parse(body);
+                        // 转发给 service 验证
+                        const vRes = await fetch(`${apiUrl}/api/wallet/verify`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ nonce: n, wallet_address, signature }),
+                        });
+                        const vData = await vRes.json();
+                        const ok = vRes.ok && vData.success === true;
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: ok, error: vData.error }));
+                        resolveResult({ success: ok, wallet: ok ? wallet_address : undefined, error: vData.error });
+                        // 延迟关闭，让页面显示成功
+                        setTimeout(() => server.close(), 3000);
+                    }
+                    catch (err) {
+                        res.writeHead(500);
+                        res.end(JSON.stringify({ success: false, error: String(err) }));
+                    }
+                });
+                return;
+            }
+            res.writeHead(404);
+            res.end();
+        });
+        server.listen(0, '127.0.0.1', () => {
+            const addr = server.address();
+            port = addr.port;
+            // TTL 超时自动关闭
+            setTimeout(() => {
+                server.close();
+                resolveResult({ success: false, error: 'timeout' });
+            }, ttlMs);
+            resolveStart({ url: `http://127.0.0.1:${port}/`, result: resultPromise });
+        });
+    });
+}
 // ─── Plugin Entry ─────────────────────────────────────────────────────────────
-exports.default = (0, plugin_sdk_1.definePluginEntry)({
+exports.default = definePluginEntry({
     id: "clawmine",
     name: "ClawMine",
     description: "Token usage tracking + Solana on-chain reward settlement",
@@ -287,63 +495,45 @@ exports.default = (0, plugin_sdk_1.definePluginEntry)({
                 }, 5 * 60000);
             },
         });
-        // ── 2. /mine-bind ─────────────────────────────────────────────────────────
+        // ── 2. /mine-bind — 一键浏览器签名绑定 ──────────────────────────────────
         api.registerCommand({
             name: "mine-bind",
-            description: "Bind your Solana wallet to receive ClawMine rewards. Usage: /mine-bind <wallet-address>",
-            acceptsArgs: true,
-            async handler(ctx) {
-                const walletAddress = ctx.args?.trim();
-                if (!walletAddress) {
-                    return reply("❌ Please provide a wallet address: `/mine-bind <Solana wallet address>`");
-                }
+            description: "Bind your Solana wallet via browser. Run /mine-bind to open the signing page.",
+            acceptsArgs: false,
+            async handler(_ctx) {
                 try {
-                    const res = await fetch(`${apiUrl}/api/wallet/challenge`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ user_id: userId, wallet_address: walletAddress }),
+                    // 启动本地绑定服务（随机端口，5分钟 TTL）
+                    const { url, result } = await startBindServer({
+                        userId,
+                        apiUrl,
+                        ttlMs: 5 * 60000,
                     });
-                    const data = await res.json();
+                    // 自动打开浏览器
+                    openBrowser(url);
+                    // 立即返回链接（不阻塞对话框）
+                    // 异步等待结果，完成后再发一条消息
+                    result.then(bindResult => {
+                        // 无法在异步回调里向对话框发消息（plugin-sdk 限制），
+                        // 用户刷新状态可用 /mine-status 查看
+                        void bindResult;
+                    });
                     return reply([
-                        `🔐 **钱包绑定挑战已生成**`,
-                        `钱包地址：\`${walletAddress}\``,
-                        `有效期：${new Date(data.expiresAt).toLocaleString('zh-CN')}`,
+                        `🔐 **绑定页面已在浏览器打开**`,
                         ``,
-                        `**请用你的 Solana 钱包对以下字符串签名：**`,
-                        `\`\`\``,
-                        data.challenge,
-                        `\`\`\``,
-                        `签名后运行：/mine-verify ${data.nonce} ${walletAddress} <your Base58 signature>`,
+                        `如果浏览器未自动打开，请手动访问：`,
+                        `\`${url}\``,
+                        ``,
+                        `**操作步骤：**`,
+                        `1. 页面自动检测 Phantom 扩展`,
+                        `2. 点击 **Connect & Sign** 按钮`,
+                        `3. Phantom 弹出签名请求 → 点击 **Approve**`,
+                        `4. 完成后运行 \`/mine-status\` 确认绑定`,
+                        ``,
+                        `⏰ 链接有效期 5 分钟`,
                     ].join('\n'));
                 }
                 catch (err) {
-                    return reply(`❌ 请求失败：${err.message}`);
-                }
-            },
-        });
-        // ── 3. /mine-verify ───────────────────────────────────────────────────────
-        api.registerCommand({
-            name: "mine-verify",
-            description: "Submit wallet signature to complete binding. Usage: /mine-verify <nonce> <wallet-address> <signature>",
-            acceptsArgs: true,
-            async handler(ctx) {
-                const parts = ctx.args?.trim().split(/\s+/) ?? [];
-                if (parts.length < 3)
-                    return reply("❌ Usage: `/mine-verify <nonce> <wallet-address> <signature>`");
-                const [nonce, walletAddress, signature] = parts;
-                try {
-                    const res = await fetch(`${apiUrl}/api/wallet/verify`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ nonce, wallet_address: walletAddress, signature }),
-                    });
-                    const data = await res.json();
-                    if (!res.ok || !data.success)
-                        return reply(`❌ 验证失败：${data.error ?? '未知错误'}`);
-                    return reply(`✅ **钱包绑定成功！** \`${walletAddress}\` 已关联到你的节点。从下一个 Epoch 起开始累积奖励。`);
-                }
-                catch (err) {
-                    return reply(`❌ 验证失败：${err.message}`);
+                    return reply(`❌ 启动失败：${err.message}`);
                 }
             },
         });
