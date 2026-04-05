@@ -239,80 +239,80 @@ function buildBindPage(params: {
 <title>ClawMine — Bind Wallet</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0a0a0a;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
-.card{background:#111;border:1px solid #222;border-radius:16px;padding:40px;max-width:520px;width:100%;text-align:center}
-.logo{font-size:36px;margin-bottom:18px}
-h1{font-size:22px;font-weight:700;margin-bottom:8px}.sub{font-size:14px;color:#666;margin-bottom:20px;line-height:1.6}
-.node{font-size:11px;color:#38bdf8;margin-bottom:24px;font-family:ui-monospace,monospace;padding:6px 12px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:6px;display:inline-block}
-.challenge{display:none;background:#0f1117;border:1px solid #1a1a1a;border-radius:8px;padding:10px 12px;font-family:ui-monospace,monospace;font-size:11px;color:#38bdf8;text-align:left;word-break:break-all;margin:18px 0;line-height:1.6}
-.btn{width:100%;height:52px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;transition:all .15s;border:1px solid #2a2a2a;background:#161616;color:#e5e5e5;display:flex;align-items:center;justify-content:center;gap:10px}
-.btn:hover{background:#1e1e1e;border-color:#444}.btn:disabled{opacity:.5;cursor:not-allowed}
-.status{margin-top:18px;font-size:14px;color:#666;line-height:1.6;min-height:22px}.status.ok{color:#4ade80}.status.err{color:#f87171}.status.info{color:#38bdf8}
-.spinner{display:inline-block;width:16px;height:16px;border:2px solid #333;border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;margin-right:8px}@keyframes spin{to{transform:rotate(360deg)}}
-.icon{font-size:18px}
+body{background:#0a0a0a;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+.card{background:#111;border:1px solid #1e1e1e;border-radius:16px;padding:48px 40px;
+      max-width:440px;width:100%;text-align:center}
+.logo{font-size:40px;margin-bottom:20px}
+h1{font-size:22px;font-weight:700;margin-bottom:8px}
+.sub{font-size:14px;color:#555;margin-bottom:24px;line-height:1.6}
+.node{font-size:11px;color:#38bdf8;font-family:ui-monospace,monospace;
+      padding:6px 14px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);
+      border-radius:20px;display:inline-block;margin-bottom:32px}
+.status{font-size:15px;color:#666;line-height:1.7;min-height:24px}
+.status.ok{color:#4ade80}.status.err{color:#f87171}.status.info{color:#aaa}
+.spinner{display:inline-block;width:18px;height:18px;
+         border:2px solid #222;border-top-color:#38bdf8;
+         border-radius:50%;animation:spin .7s linear infinite;
+         margin-right:10px;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+.retry{margin-top:20px;height:42px;padding:0 24px;border-radius:8px;
+       font-size:14px;font-weight:600;cursor:pointer;
+       border:1px solid #2a2a2a;background:#161616;color:#e5e5e5;display:none}
+.retry:hover{background:#1e1e1e}
 </style>
 </head>
 <body>
   <div class="card">
     <div class="logo">⚡</div>
-    <h1>Bind Your Wallet</h1>
-    <p class="sub">This is a <strong>ClawMine plugin</strong> feature.<br/>Approve one signature to link your wallet to this OpenClaw node.</p>
+    <h1>Binding to ClawMine</h1>
+    <p class="sub">Phantom will pop up automatically.<br/>Click <strong>Sign</strong> to link your wallet to this node.</p>
     <div class="node">Node · ${userId.slice(0, 8)}&hellip;</div>
-    <button class="btn" id="btn" onclick="doSign()">
-      <span class="icon">${walletHint === 'solflare' ? '☀️' : '👻'}</span>
-      <span>Connect & Sign with ${walletHint === 'solflare' ? 'Solflare' : walletHint === 'phantom' ? 'Phantom' : 'Wallet'}</span>
-    </button>
-    <div class="challenge" id="challenge"></div>
-    <div class="status" id="status"></div>
+    <div class="status" id="st"></div>
+    <button class="retry" id="retry" onclick="doSign()">Try Again</button>
   </div>
 <script>
 const NONCE=${JSON.stringify(nonce)};
 const CHALLENGE=${JSON.stringify(challenge)};
-const CALLBACK='http://127.0.0.1:${callbackPort}/callback';
-const WALLET_HINT=${JSON.stringify(walletHint)};
+const CB='http://127.0.0.1:${callbackPort}/callback';
 
-function setStatus(msg, cls=''){const el=document.getElementById('status');el.innerHTML=msg;el.className='status '+cls;}
-function toBase58(bytes){const A='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';let d=[],s='',j,c,n;for(let i=0;i<bytes.length;i++){j=0;c=bytes[i];s+=c===0&&s.length===0?'1':'';while(j<d.length||(c>0)){n=(d[j]||0)*256+c;d[j]=n%58;c=n/58|0;j++;}}while(d.length>0)s+=A[d.pop()];return s;}
-
-function pickProvider(){
-  if (WALLET_HINT === 'phantom') return window.phantom?.solana;
-  if (WALLET_HINT === 'solflare') return window.solflare;
-  return window.phantom?.solana ?? window.solflare ?? window.solana;
+function st(msg,cls){
+  document.getElementById('st').innerHTML=msg;
+  document.getElementById('st').className='status '+(cls||'');
 }
-
+function showRetry(show){
+  document.getElementById('retry').style.display=show?'inline-block':'none';
+}
+function b58(bytes){
+  const A='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  let d=[],s='',j,c,n;
+  for(let i=0;i<bytes.length;i++){
+    j=0;c=bytes[i];s+=c===0&&s.length===0?'1':'';
+    while(j<d.length||(c>0)){n=(d[j]||0)*256+c;d[j]=n%58;c=n/58|0;j++;}
+  }
+  while(d.length>0)s+=A[d.pop()];return s;
+}
 async function doSign(){
-  const btn=document.getElementById('btn');
-  const challengeBox=document.getElementById('challenge');
-  btn.disabled=true;
-  setStatus('<span class="spinner"></span>Connecting wallet…','info');
+  showRetry(false);
+  st('<span class="spinner"></span>Waiting for Phantom…','info');
   try{
-    const provider=pickProvider();
-    if(!provider) throw new Error((WALLET_HINT==='solflare'?'Solflare':'Phantom') + ' not found in this browser.');
-    const resp=await provider.connect();
-    const pubkey=resp.publicKey.toString();
-    challengeBox.style.display='block';
-    challengeBox.textContent=CHALLENGE;
-    setStatus('<span class="spinner"></span>Approve the signature in your wallet…','info');
-    const encoded=new TextEncoder().encode(CHALLENGE);
-    const signed=await provider.signMessage(encoded,'utf8');
-    const signature=toBase58(signed.signature);
-    setStatus('<span class="spinner"></span>Verifying…','info');
-    const res=await fetch(CALLBACK,{method:'POST',headers:{'Content-Type':'text/plain'},body:NONCE+'|'+pubkey+'|'+signature});
-    const data=await res.json();
-    if(!data.success) throw new Error(data.error||'Bind failed');
-    btn.style.background='#0f2a0f';
-    btn.style.color='#4ade80';
-    btn.textContent='Wallet Bound';
-    setStatus('✅ <strong>'+pubkey.slice(0,6)+'…'+pubkey.slice(-4)+'</strong> linked successfully.<br/><span style="color:#555;font-size:12px">Return to OpenClaw and run <code>/mine-status</code>.</span>','ok');
-    challengeBox.style.display='none';
+    const p=window.phantom?.solana;
+    if(!p) throw new Error('Phantom extension not found. Please install Phantom and refresh.');
+    const r=await p.connect();
+    const pub=r.publicKey.toString();
+    st('<span class="spinner"></span>Approve the message in Phantom…','info');
+    const sig=b58((await p.signMessage(new TextEncoder().encode(CHALLENGE),'utf8')).signature);
+    st('<span class="spinner"></span>Verifying…','info');
+    const res=await fetch(CB,{method:'POST',headers:{'Content-Type':'text/plain'},body:NONCE+'|'+pub+'|'+sig});
+    const d=await res.json();
+    if(!d.success) throw new Error(d.error||'Verification failed');
+    st('✅ <strong style="color:#4ade80">'+pub.slice(0,6)+'…'+pub.slice(-4)+'</strong> linked!<br/><span style="font-size:12px;color:#555">You can close this tab.</span>','ok');
   }catch(e){
-    btn.disabled=false;
-    setStatus('❌ '+(e.message||String(e)),'err');
+    st('❌ '+(e.message||String(e)),'err');
+    showRetry(true);
   }
 }
-
-// auto-start after page load
-setTimeout(doSign, 250);
+setTimeout(doSign,300);
 <\/script>
 </body>
 </html>`;
@@ -456,26 +456,23 @@ export default definePluginEntry({
 
     api.registerCommand({
       name: "mine-bind",
-      description: "Bind your Solana wallet. Usage: /mine-bind",
+      description: "Bind your Phantom wallet to this node. Usage: /mine-bind",
       acceptsArgs: false,
       async handler(_ctx: PluginCommandContext) {
         try {
-          const phantom = await startBindServer({ userId, apiUrl, walletHint: 'phantom' });
-          const solflare = await startBindServer({ userId, apiUrl, walletHint: 'solflare' });
+          const { url } = await startBindServer({ userId, apiUrl, walletHint: 'phantom' });
+
+          // 自动打开浏览器，页面自动触发 Phantom 签名
+          openBrowser(url);
 
           return reply([
-            `🔐 **Bind your wallet**`,
+            `🔐 **Wallet binding started**`,
             ``,
-            `This is a **ClawMine plugin** feature, not a built-in OpenClaw wallet function.`,
-            `Choose your wallet below:`,
+            `A signing page has been opened in your browser.`,
+            `Phantom will pop up automatically — just click **Confirm** to complete.`,
             ``,
-            `- **Phantom**: \`${phantom.url}\``,
-            `- **Solflare**: \`${solflare.url}\``,
-            ``,
-            `When the wallet popup appears, approve the signature request.`,
-            `After success, run \`/mine-status\` to confirm the binding.`,
-            ``,
-            `⏰ Both links expire in 5 minutes.`,
+            `After success, run \`/mine-status\` to verify.`,
+            `⏰ Expires in 5 minutes.`,
           ].join('\n'));
         } catch (err) {
           return reply(`❌ Failed to start bind flow: ${(err as Error).message}`);
