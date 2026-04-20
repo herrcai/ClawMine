@@ -1,6 +1,7 @@
 {
   "id": "clawmine",
   "name": "ClawMine",
+  "main": "dist/index.js",
   "description": "[Community plugin, not affiliated with OpenClaw] Automatically track token usage across all your OpenClaw agents and earn Solana on-chain rewards. Bind your wallet, accumulate tokens, and claim Claw Token rewards each epoch.",
   "configSchema": {
     "type": "object",

@@ -1,11 +1,11 @@
 /**
- * ClawMine — OpenClaw Plugin
+ * ClawMine Plugin for OpenClaw
  *
- * Built-in plugin features:
- * 1. registerService  — generate/load persistent node userId, send heartbeat, scan local session files, report token usage
- * 2. /mine-bind       — start wallet bind flow (plugin-owned local signing page)
- * 3. /mine-status     — show current epoch status and node reward summary
- * 4. /mine-rewards    — show reward history
+ * Features:
+ * 1. Token usage tracking via session file scanning
+ * 2. Wallet binding with Solana wallet
+ * 3. Epoch status and reward history
+ * 4. Automatic on-chain settlement
  */
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { definePluginEntry } = require("./node_modules/openclaw/dist/plugin-sdk/plugin-entry.js") as typeof import("./node_modules/openclaw/dist/plugin-sdk/plugin-entry");
@@ -234,7 +234,7 @@ function buildBindPage(params: {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>ClawMine — Bind Wallet</title>
+<title>ClawMine Wallet Binding</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0a0a0a;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
@@ -289,14 +289,14 @@ async function doSign(){
   btn.disabled=true;
   try{
     // Step 1: connect wallet
-    st('<span class="spinner"></span>Connecting to Phantom…','info');
+    st('<span class="spinner"></span>Connecting to Phantom...','info');
     const p=window.phantom?.solana;
     if(!p) throw new Error('Phantom not found. Install the Phantom extension and refresh.');
     const r=await p.connect();
     const pub=r.publicKey.toString();
 
     // Step 2: get challenge from local plugin server (plugin forwards to service)
-    st('<span class="spinner"></span>Preparing signature request…','info');
+    st('<span class="spinner"></span>Preparing signature request...','info');
     const cr=await fetch(LOCAL+'/challenge',{
       method:'POST',headers:{'Content-Type':'text/plain'},body:USER_ID+'|'+pub
     });
@@ -304,11 +304,11 @@ async function doSign(){
     if(!cd.nonce) throw new Error('Failed to get challenge: '+(cd.error||cr.status));
 
     // Step 3: sign with Phantom
-    st('<span class="spinner"></span>Sign the message in the Phantom popup…','info');
+    st('<span class="spinner"></span>Sign the message in the Phantom popup...','info');
     const sig=b58((await p.signMessage(new TextEncoder().encode(cd.challenge),'utf8')).signature);
 
     // Step 4: verify via local plugin
-    st('<span class="spinner"></span>Verifying…','info');
+    st('<span class="spinner"></span>Verifying...','info');
     const vr=await fetch(LOCAL+'/callback',{
       method:'POST',headers:{'Content-Type':'text/plain'},
       body:cd.nonce+'|'+pub+'|'+sig
@@ -318,7 +318,7 @@ async function doSign(){
 
     btn.style.cssText='background:#0f2a0f;color:#4ade80;border:1px solid #1a4a1a;cursor:default';
     btn.innerHTML='✅ Wallet Bound';
-    // 成功后跳转到关闭页
+    // Redirect to success page
     window.location.href = LOCAL + '/done?wallet=' + encodeURIComponent(pub);
   }catch(e){
     btn.disabled=false;
@@ -335,8 +335,7 @@ async function doSign(){
 </html>`;
 }
 
-// ─── Chain Submit (local keypair, runs in plugin process) ────────────────────
-// 通过独立 CLI 脚本提交链上（CLI 脚本有完整依赖，私鑰不离开本地）
+// Submit on-chain settlement (runs in plugin process)
 async function runChainSubmit(
   _epochs: unknown,
   keypairPath: string,
@@ -345,7 +344,6 @@ async function runChainSubmit(
   logger: { info: (m: string) => void; warn: (m: string) => void }
 ): Promise<Array<{ epochId: number; sig?: string; error?: string }>> {
   return new Promise((resolve) => {
-    // CLI 脚本路径： settlement-service/scripts/chain-submit-cli.js
     const scriptPath = path.join(
       os.homedir(), '.openclaw', 'workspace', 'claw-settle',
       'settlement-service', 'scripts', 'chain-submit-cli.js'
@@ -358,331 +356,7 @@ async function runChainSubmit(
     const { execFile } = require('child_process');
     let stdout = '';
     const child = execFile(
-      process.execPath, // node 可执行文件
+      process.execPath,
       [scriptPath, apiUrl, keypairPath],
       { timeout: 5 * 60 * 1000, maxBuffer: 1024 * 1024 },
-      (err: Error | null, out: string) => {
-        stdout = out || '';
-        try {
-          const result = JSON.parse(stdout);
-          if (result.error) {
-            resolve([{ epochId: 0, error: result.error }]);
-          } else {
-            resolve(result.results ?? []);
-          }
-        } catch {
-          resolve([{ epochId: 0, error: `parse error: ${stdout.slice(0, 200)}` }]);
-        }
-      }
-    );
-    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-  });
-}
-
-function startBindServer(params: {
-  userId: string;
-  apiUrl: string;
-  walletHint: 'phantom' | 'solflare' | 'auto';
-  ttlMs?: number;
-}): Promise<{ url: string; result: Promise<{ success: boolean; wallet?: string; error?: string }> }> {
-  return new Promise((resolveStart) => {
-    const { userId, apiUrl, walletHint, ttlMs = 5 * 60_000 } = params;
-    // challenge is now fetched dynamically via /challenge endpoint after wallet connects
-
-    let port = 0;
-    let resolved = false;
-    let resolveResult!: (v: { success: boolean; wallet?: string; error?: string }) => void;
-    const resultPromise = new Promise<{ success: boolean; wallet?: string; error?: string }>(r => { resolveResult = r; });
-
-    const finalize = (payload: { success: boolean; wallet?: string; error?: string }) => {
-      if (resolved) return;
-      resolved = true;
-      resolveResult(payload);
-    };
-
-    const server = http.createServer((req, res) => {
-      const url = new URL(req.url!, `http://127.0.0.1:${port}`);
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-      if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-      // /done — 绑定成功后跳转到此页，提示用户关闭页面
-      if (req.method === 'GET' && url.pathname === '/done') {
-        const wallet = url.searchParams.get('wallet') ?? '';
-        const short = wallet ? wallet.slice(0,6)+'…'+wallet.slice(-4) : '';
-        const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Wallet Bound</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0a0a0a;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-     display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{text-align:center;padding:48px 40px;max-width:400px}
-.check{font-size:64px;margin-bottom:24px}
-h1{font-size:22px;font-weight:700;color:#4ade80;margin-bottom:12px}
-p{font-size:14px;color:#555;line-height:1.7}
-.addr{font-family:monospace;color:#38bdf8;font-size:13px;
-      background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);
-      border-radius:6px;padding:4px 10px;display:inline-block;margin:6px 0}
-.hint{margin-top:20px;font-size:13px;color:#333}
-</style></head><body>
-<div class="card">
-  <div class="check">✅</div>
-  <h1>Wallet Bound!</h1>
-  <p><span class="addr">${short}</span><br/>is now linked to your ClawMine node.</p>
-  <p class="hint">You can close this tab.</p>
-</div>
-</body></html>`;
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(html);
-        return;
-      }
-
-      // /challenge — 浏览器连上钱包后，用真实地址向 service 申请 challenge
-      if (req.method === 'POST' && url.pathname === '/challenge') {
-        let body = '';
-        req.on('data', d => body += d);
-        req.on('end', async () => {
-          try {
-            const [uid, walletAddress] = body.split('|');
-            const cr = await fetch(`${apiUrl}/api/wallet/challenge`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ user_id: uid, wallet_address: walletAddress }),
-            });
-            const cData = await cr.json() as { nonce?: string; challenge?: string; error?: string };
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(cData));
-          } catch (err) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: String(err) }));
-          }
-        });
-        return;
-      }
-
-      if (req.method === 'GET' && url.pathname === '/') {
-        const html = buildBindPage({ userId, callbackPort: port, walletHint });
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(html);
-        return;
-      }
-
-      if (req.method === 'POST' && url.pathname === '/callback') {
-        let body = '';
-        req.on('data', d => body += d);
-        req.on('end', async () => {
-          try {
-            let n = '', wallet_address = '', signature = '';
-            const ct = req.headers['content-type'] ?? '';
-            if (ct.includes('application/json')) {
-              ({ nonce: n, wallet_address, signature } = JSON.parse(body));
-            } else {
-              [n, wallet_address, signature] = body.split('|');
-            }
-            const vRes = await fetch(`${apiUrl}/api/wallet/verify`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ nonce: n, wallet_address, signature }),
-            });
-            const vData = await vRes.json() as { success?: boolean; error?: string };
-            const ok = vRes.ok && vData.success === true;
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: ok, error: vData.error }));
-            finalize({ success: ok, wallet: ok ? wallet_address : undefined, error: vData.error });
-            setTimeout(() => server.close(), 3000);
-          } catch (err) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: false, error: String(err) }));
-          }
-        });
-        return;
-      }
-
-      res.writeHead(404); res.end();
-    });
-
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as { port: number };
-      port = addr.port;
-      setTimeout(() => {
-        server.close();
-        finalize({ success: false, error: 'timeout' });
-      }, ttlMs);
-      resolveStart({ url: `http://127.0.0.1:${port}/`, result: resultPromise });
-    });
-  });
-}
-
-export default definePluginEntry({
-  id: "clawmine",
-  name: "ClawMine",
-  description: "Token usage tracking + Solana on-chain reward settlement",
-
-  register(api) {
-    const pluginConfig = api.pluginConfig as {
-      settlementApiUrl?: string;
-      internalApiKey?: string;
-      serverSecret?: string;
-    };
-    const apiUrl = pluginConfig.settlementApiUrl ?? "http://127.0.0.1:3100";
-    const apiKey = pluginConfig.internalApiKey   ?? "claw-settle-dev-key-2026";
-    const secret = pluginConfig.serverSecret     ?? "claw-settle-dev-secret-2026";
-
-    const userId = loadOrCreateUserId();
-    api.logger.info(`[ClawMine] userId=${userId}`);
-
-    api.registerService({
-      id: 'claw-settle-scanner',
-      async start() {
-        api.logger.info('[ClawMine] Session scanner started');
-        await registerNode(apiUrl, apiKey, userId, api.logger);
-        await scanAndReport(apiUrl, apiKey, secret, userId, api.logger);
-        setInterval(() => {
-          scanAndReport(apiUrl, apiKey, secret, userId, api.logger).catch(err =>
-            api.logger.warn(`[ClawMine] scan error: ${err.message}`)
-          );
-        }, 60_000);
-        setInterval(() => {
-          sendHeartbeat(apiUrl, apiKey, userId);
-        }, 5 * 60_000);
-
-        // 自动提交链上：每 5 分钟检查并自动提交 pending epoch
-        const autoSettle = async () => {
-          try {
-            const keypairPath = process.env.SOLANA_KEYPAIR_PATH ?? path.join(os.homedir(), '.config', 'solana', 'id.json');
-            if (!fs.existsSync(keypairPath)) return; // 无私鑰，跳过
-            const res = await fetch(`${apiUrl}/api/epochs/pending-chain-submit`);
-            if (!res.ok) return;
-            const { epochs } = await res.json() as { epochs: Array<{ epoch_id: number; merkle_root: string; reward_pool: string }> };
-            if (epochs.length === 0) return;
-            api.logger.info(`[ClawMine] Auto-settling ${epochs.length} pending epoch(s)...`);
-            await runChainSubmit(epochs, keypairPath, apiUrl, pluginConfig, api.logger);
-          } catch (err) {
-            api.logger.warn(`[ClawMine] Auto-settle error: ${(err as Error).message}`);
-          }
-        };
-        // 启动时立即运行一次，然后每 5 分钟
-        autoSettle();
-        setInterval(autoSettle, 5 * 60_000);
-      },
-    });
-
-    api.registerCommand({
-      name: "mine-bind",
-      description: "Bind your Phantom wallet to this node. Usage: /mine-bind",
-      acceptsArgs: false,
-      async handler(_ctx: PluginCommandContext) {
-        try {
-          // 检查是否已绑定
-          const existing = await fetch(`${apiUrl}/api/wallet/${userId}`);
-          if (existing.ok) {
-            const w = await existing.json() as { wallet_address: string };
-            const addr = w.wallet_address;
-            return reply(`✅ **Already bound**\n\nThis node is already linked to wallet \`${addr.slice(0,6)}...${addr.slice(-4)}\`.\n\nRun \`/mine-status\` to see your rewards.`);
-          }
-
-          const { url, result } = await startBindServer({ userId, apiUrl, walletHint: 'phantom' });
-          openBrowser(url);
-
-          // 先告知用户浏览器已打开，同时等待绑定结果（最多 5 分钟）
-          // Note: OpenClaw plugin-sdk 不支持异步推送，所以这里同步等待完成再返回
-          const bindResult = await Promise.race([
-            result,
-            new Promise<{ success: false; error: string }>(r =>
-              setTimeout(() => r({ success: false, error: 'timeout' }), 5 * 60_000)
-            ),
-          ]);
-
-          if (bindResult.success) {
-            const addr = bindResult.wallet ?? '';
-            return reply([
-              `✅ **Wallet bound successfully!**`,
-              ``,
-              `\`${addr.slice(0,6)}...${addr.slice(-4)}\` is now linked to this node.`,
-              `Rewards will accumulate from the next epoch.`,
-            ].join('\n'));
-          } else if (bindResult.error === 'timeout') {
-            return reply(`⏰ **Binding timed out.** Run \`/mine-bind\` again to retry.`);
-          } else {
-            return reply(`❌ **Binding failed:** ${bindResult.error}\n\nRun \`/mine-bind\` to retry.`);
-          }
-        } catch (err) {
-          return reply(`❌ Failed: ${(err as Error).message}`);
-        }
-      },
-    });
-
-    api.registerCommand({
-      name: "mine-status",
-      description: "View current epoch status and your reward summary",
-      async handler(_ctx: PluginCommandContext) {
-        try {
-          const [epochRes, rewardsRes] = await Promise.all([
-            fetch(`${apiUrl}/api/epochs/current`),
-            fetch(`${apiUrl}/api/rewards/${userId}`),
-          ]);
-          const epoch = epochRes.ok ? await epochRes.json() as { epoch_id: number; end_time: string; reward_pool: string } : null;
-          const rewardsData = rewardsRes.ok ? await rewardsRes.json() as { rewards: unknown[] } : { rewards: [] };
-          const lines = [`📊 **ClawMine Status**`, ``, `Node ID: \`${userId.slice(0, 8)}...\``];
-          if (epoch) {
-            const diff = new Date(epoch.end_time).getTime() - Date.now();
-            const mins = Math.max(0, Math.floor(diff / 60000));
-            lines.push(``, `Current Epoch #${epoch.epoch_id} · ${mins} min left · Reward Pool ${(BigInt(epoch.reward_pool) / 1_000_000n).toString()} CLAW`);
-          }
-          lines.push(``, `Reward history: ${rewardsData.rewards.length} records · \`/mine-rewards\` for details`);
-          return reply(lines.join('\n'));
-        } catch (err) {
-          return reply(`❌ Failed to fetch status: ${(err as Error).message}`);
-        }
-      },
-    });
-
-    api.registerCommand({
-      name: "mine-settle",
-      description: "[Admin] Manually trigger chain settlement. Normally runs automatically.",
-      async handler(_ctx: PluginCommandContext) {
-        try {
-          const keypairPath = process.env.SOLANA_KEYPAIR_PATH ?? path.join(os.homedir(), '.config', 'solana', 'id.json');
-          if (!fs.existsSync(keypairPath)) return reply(`❌ Keypair not found at \`${keypairPath}\`.`);
-          const res = await fetch(`${apiUrl}/api/epochs/pending-chain-submit`);
-          if (!res.ok) return reply(`❌ Failed to fetch pending epochs: ${res.status}`);
-          const { epochs } = await res.json() as { epochs: Array<{ epoch_id: number; merkle_root: string; reward_pool: string }> };
-          if (epochs.length === 0) return reply(`✅ All epochs settled. Nothing to submit.`);
-          const results = await runChainSubmit(epochs, keypairPath, apiUrl, pluginConfig, api.logger);
-          const lines = [`⛓️ **Chain Submit** — ${epochs.length} epoch(s)`, ``];
-          for (const r of results) {
-            if (r.sig) lines.push(`✅ Epoch #${r.epochId} → ${r.sig.slice(0,12)}…`);
-            else lines.push(`❌ Epoch #${r.epochId}: ${r.error}`);
-          }
-          return reply(lines.join('\n'));
-        } catch (err) {
-          return reply(`❌ /mine-settle error: ${(err as Error).message}`);
-        }
-      },
-    });
-
-    api.commands.register({
-      name: "mine-rewards",
-      description: "View your reward history",
-      async handler(_ctx: PluginCommandContext) {
-        try {
-          const res = await fetch(`${apiUrl}/api/rewards/${userId}`);
-          const data = await res.json() as { rewards: Array<{ epoch_id: number; total_tokens: string; reward_amount: string; claimed: boolean; status: string }> };
-          const rewards = data.rewards ?? [];
-          if (rewards.length === 0) return reply(`💎 **Reward History**\n\nNo rewards yet.`);
-          const lines = [`💎 **Reward History**`, ``];
-          for (const r of rewards) {
-            const badge = r.claimed ? 'Claimed' : r.status === 'finalized' ? 'Claimable' : 'Pending';
-            lines.push(`#${r.epoch_id} · ${badge} · ${(Number(r.reward_amount) / 1_000_000).toFixed(6)} CLAW · ${Number(r.total_tokens).toLocaleString()} tokens`);
-          }
-          return reply(lines.join('\n'));
-        } catch (err) {
-          return reply(`❌ Failed to fetch rewards: ${(err as Error).message}`);
-        }
-      },
-    });
-
-    api.logger.info("[ClawMine] Plugin loaded — session scanner active");
-  },
-});
+      (
